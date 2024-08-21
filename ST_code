@@ -1,0 +1,875 @@
+library(STutility)
+library(Seurat)
+library(ggplot2)
+library(tidyverse)
+
+A_H4 <- data.frame(samples='~/Desktop/Projects/iCCA_ST/DataSet/Data/1_SpaceRanger_analysis/2_expression/A_H4.filtered_feature_bc_matrix.h5',
+                   spotfiles ='~/Desktop/Projects/iCCA_ST/DataSet/Data/1_SpaceRanger_analysis/2_expression/A_H4.spatial/tissue_positions_list.csv',
+                   imgs ='~/Desktop/Projects/iCCA_ST/DataSet/Data/1_SpaceRanger_analysis/2_expression/A_H4.spatial/tissue_hires_image.png',
+                   json = '~/Desktop/Projects/iCCA_ST/DataSet/Data/1_SpaceRanger_analysis/2_expression/A_H4.spatial/scalefactors_json.json')
+A_H4 <- InputFromTable(infotable = A_H4, platform =  "Visium")
+
+library(foreach)
+library(parallel)
+plt <- function(i){
+  print(ggplot() +
+          geom_histogram(data = A_H4[[]], aes(get(i)), fill = 'red', alpha = 0.7, color = 'gray', bins = 50) +
+          Seurat::DarkTheme() +
+          ggtitle(paste0('Total', i, 'per spots')))
+}
+pl = list()
+pl1 <- foreach::foreach(i = c('nFeature_RNA', 'nCount_RNA'), .packages = c('Seurat', 'ggplot2')) %dopar% plt(i)
+gene_attr <- data.frame(nUMI = Matrix::rowSums(A_H4@assays$RNA@counts),
+                        nSpots = Matrix::rowSums(A_H4@assays$RNA@counts > 0))
+plt2 <- function(i){
+  print(ggplot() +
+          geom_histogram(data = gene_attr, aes(get(i)), fill = 'red', alpha = 0.7, color = 'gray', bins = 50) +
+          Seurat::DarkTheme() +
+          ggtitle(paste0('Total', i, 'per gene')))
+}
+pl2 <- foreach::foreach(i = c('nUMI', 'nSpots'), .packages = c('Seurat', 'ggplot2')) %dopar% plt2(i)
+cowplot::plot_grid(plotlist = c(pl1, pl2))
+
+#Collect all genes coded on the mitochondrial genome
+mt.genes <- grep(pattern = '^MT-', x = rownames(A_H4), value = TRUE)
+A_H4$percent.mito <- (Matrix::colSums(A_H4@assays$RNA@counts[mt.genes, ])/Matrix::colSums(A_H4@assays$RNA@counts))*100
+
+#Collect all genes coding for ribosomal proteins
+rp.genes <- grep(pattern = '^RPL|^RPS', x = rownames(A_H4), value = TRUE)
+A_H4$percent.ribo <- (Matrix::colSums(A_H4@assays$RNA@counts[rp.genes, ])/Matrix::colSums(A_H4@assays$RNA@counts))*100
+head(A_H4@meta.data)
+
+p1 <- map(c('percent.mito', 'percent.ribo'), function(x) ST.FeaturePlot(A_H4, features = x, dark.theme = TRUE,
+                                                                        cols = c('dark blue', 'cyan', 'yellow', 'red', 'dark red')))
+cowplot::plot_grid(plotlist = c(p1))
+ST.FeaturePlot(D_SH8, features = c('nFeature_RNA', 'nCount_RNA'), dark.theme = F, pt.size = 1.2, 
+               cols = c('#8EABC1', '#F5F7FA', '#C3CFE2', '#556B2F', '#ffd452'))
+
+A_H4 <- LoadImages(A_H4, time.resolve = F, verbose = T)
+ImagePlot(A_H4, method = 'raster', darken = TRUE, type = 'raw')
+FeatureOverlay(A_H4, sampleids = 1:2, features = c('EPCAM'), 
+               pt.size = 1.0, cols = c('dark blue', 'cyan', 'yellow', 'red', 'dark red'),
+               dark.theme = F, type = 'raw') #查看marker
+# Marker genes: "CD79A", #B-cell; "FXYD2", #Cholangiocyte; "CD1C", #Dendritic; "ENG", #Endothelial; "ACTA2", #Fibroblast;
+# "APOC3", #Hepatocyte; "CD14", #Macrophage; "KRT19", #Malignant; "CD7", #NK cell; "CD3D", #T-cell
+
+A_H4 <- MaskImages(object = A_H4)
+ImagePlot(A_H4, method = 'raster', type = 'masked', darken = F)
+
+A_H4 <- ManualAnnotation(A_H4)
+
+library(Matrix)
+library(magrittr)
+library(spdep)
+#library(devtools)
+#install_github('linxihui/NNLM')
+library(NNLM)
+# installed.packages()[,c('Package', 'Version')]
+# update.packages(checkBuilt = T, ask = F)
+
+##Run normalization
+A_H4 <- SCTransform(A_H4,variable.features.n = 5000)
+
+spatgenes <- CorSpatialGenes(A_H4)
+head(spatgenes)
+heatmap.colors <- c('dark blue', 'cyan', 'yellow', 'red', 'dark red')
+ST.FeaturePlot(A_H4, features = c('APOA1', 'ALB', 'SAA1', 'APOC3', 'TF', 'RBP4'), cols = heatmap.colors, dark.theme = T)
+
+A_H4 <- RunNMF(A_H4, nfactors = 20) 
+ST.DimPlot(A_H4, ncol = 2, grid.ncol = 2, reduction = 'NMF', dark.theme = T, pt.size = 1, cols = c('darkblue', 'cyan', 'yellow', 'red', 'darkred'))
+print(A_H4[['NMF']])
+
+FactorGeneLoadingPlot(A_H4, factor = 1, dark.theme = TRUE)
+A_H4 <- FindNeighbors(object = A_H4, verbose = T, reduction = 'NMF', dims = 1:10)
+for (res in c(0,0.4,0.6,0.8,1.0,1.2,1.4,1.6,2.0) ){
+  A_H4 <- FindClusters(object = A_H4, verbose = T, algorithm = 1, resolution = res)
+}
+A_H4 <- FindClusters(object = A_H4, verbose = T, algorithm = 1, resolution = 1.0)
+A_H4 <- RunTSNE(object = A_H4, reduction = 'NMF', dims = 1:10)
+A_H4 <- RunUMAP(object = A_H4, reduction = 'NMF', dims = 1:10)
+DimPlot(A_H4, reduction = 'umap', pt.size = 1.0, 
+        cols = c('#7B5CC6', '#3C7F6C', '#E57715', '#25BF58', '#D63275', '#DBB642', 
+                 '#665419', '#4C545C', '#7EC7E0', '#2D5072', '#BBE4EF', '#B5E5C6', 
+                 '#D2B5E5', '#E8DEA3', '#E8C5A3', '#E51F1A', '#7C2927', '#C9933D', 
+                 '#C9C53D', '#8CC93D', '#8BEAD1', '#EA8BEA', 'grey', '#b2c77e', 
+                 '#2a9d8f', '#BC80BD', '#92CDEA', '#FEF8BE'))
+A_H4 <- RunUMAP(object = A_H4, dims = 1:10, verbose = FALSE, n.components = 3, reduction = 'NMF')
+ST.DimPlot(object = A_H4, dims = 1:3, reduction = 'umap', blend = T, dark.theme = T, pt.size = 1.0)
+FeaturePlot(A_H4, features = c('CD3D')) #T cell marker
+FeaturePlot(A_H4, features = c('KLRF1')) #NK cell marker
+FeaturePlot(A_H4, features = c('MS4A1')) #B cell marker
+FeaturePlot(A_H4, features = c('MZB1')) #Plasma B cell marker
+FeaturePlot(A_H4, features = c('CD1C')) #DC cell marker
+FeaturePlot(A_H4, features = c('CD68', 'CD163', 'CD14')) #Macrophage marker
+FeaturePlot(A_H4, features = c('KRT19', 'EPCAM')) #cholangiocyte or malignant cell
+FeaturePlot(A_H4, features = c('ALB')) #hepatocyte marker
+FeaturePlot(A_H4, features = c('ACTA2')) #Fibroblast marker
+FeaturePlot(A_H4, features = c('CDH5', 'ENG')) #Endothelia marker
+FeatureOverlay(A_H4, sampleids = 1:2, features = c('REG4'), 
+               pt.size = 1.0, cols = c('#8EABC1', '#F5F7FA', '#C3CFE2', '#556B2F', '#ffd452'),
+               dark.theme = F, type = 'raw')
+VlnPlot(A_H4, group.by = 'cell_type', features = 'REG4', pt.size = 0)
+library(RColorBrewer)
+#n <- 24
+#qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+#col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+ST.FeaturePlot(A_H4, features = 'seurat_clusters', dark.theme = F, pt.size = 1.5, sb.size = 5,
+               cols = c('#7B5CC6', '#3C7F6C', '#E57715', '#25BF58', '#D63275', '#DBB642', 
+                        '#665419', '#b2c77e', '#7EC7E0', '#2D5072', '#BBE4EF', '#B5E5C6', 
+                        '#D2B5E5', '#E8DEA3', '#E8C5A3', '#4C545C', '#7C2927', '#C9933D', 
+                        '#C9C53D', '#8CC93D', '#8BEAD1', '#EA8BEA', 'grey', '#E51F1A',
+                        '#2a9d8f', '#BC80BD', '#92CDEA', '#FEF8BE'))
+
+head(A_H4@assays$SCT@var.features, 20)
+top <- A_H4@assays$SCT@var.features
+
+# marker
+clustermarker <- FindAllMarkers(A_H4, only.pos = T, logfc.threshold = 0.2)
+topgene <- clustermarker %>% group_by(cluster) %>% top_n(n = 8, wt = avg_log2FC)
+DotPlot(A_H4, features =unique(topgene$gene),
+        col.min = -2, col.max = 2,
+        scale = T, dot.scale = 3,
+        cols = c("grey90", "red"))+ RotatedAxis()+ 
+  scale_colour_gradient2(low = "blue", mid = "grey90", high = "red") +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.title.y = element_blank())
+FeatureOverlay(A_H4, features = unique(topgene$gene),
+               sampleids = 1:2, cols = c('lightgray', 'mistyrose', 'red', 'darkred', 'black'),
+               pt.size = 1.0, pt.alpha = 0.5, dark.theme = T)
+celltype2cluster <- c('0' = 'P1_Fibroblast/ECM_enriched_spot', '1' = 'P1_Macrophage_enriched_spot', '2' = 'P1_Mal_1_SLC2A1',
+                      '3' = 'P1_Mal_4_necrotic', '4' = 'P1_Mal_2_TFF', '5' = 'P1_Mal_3_REG4', '6' = 'P1_Mal_1_SLC2A1',
+                      '7' = 'P1_Hepatocyte_enriched_spot', '8' = 'P1_Macrophage_enriched_spot', 
+                      '9' = 'P1_Immune_enriched_spot', '10' = 'P1_Mal_4_necrotic',
+                      '11' = 'P1_Hepatocyte_enriched_spot', '12' = 'P1_Hepatocyte_enriched_spot',
+                      '13' = 'P1_Immune_enriched_spot', '14' = 'P1_Immune_enriched_spot')
+A_H4[['cell_type']] = unname(celltype2cluster[A_H4@meta.data$seurat_clusters])
+Idents(A_H4) <- 'cell_type'
+clustermarker <- FindAllMarkers(A_H4, only.pos = T, logfc.threshold = 0.2)
+write.table(clustermarker, file ="~/Desktop/Projects/iCCA_ST/clustermarker_A_H4.txt", sep = "\t", quote = F )
+topgene <- clustermarker %>% group_by(cluster) %>% top_n(n = 8, wt = avg_log2FC)
+DotPlot(A_H4, features =unique(topgene$gene),
+        col.min = -2, col.max = 2,
+        scale = T, dot.scale = 3,
+        cols = c("grey90", "red"))+ RotatedAxis()+ 
+  scale_colour_gradient2(low = '#3498db', mid = '#f1faee', high = '#f1c40f') +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.title.y = element_blank())
+data <- DotPlot(A_H4, features =unique(topgene$gene), scale = T)$data
+write.table(data, file ="~/Desktop/Projects/iCCA_ST/data.txt", sep = "\t", quote = F )
+clustermarker <- FindMarkers(A_H4, ident.1 = 'P1_Mal_4_necrotic', ident.2 = 'P1_Hepatocyte_enriched_spot', only.pos = T, logfc.threshold = 0.5)
+write.table(clustermarker, file ="~/Desktop/Projects/iCCA_ST/clustermarker.txt", sep = "\t", quote = F )
+saveRDS(A_H4,file = "~/Desktop/Projects/iCCA_ST/DataSet/A_H4.rds")
+A_H4 <- readRDS('~/Desktop/Projects/iCCA_ST/DataSet/A_H4.rds')
+
+#Heatmap
+library(tidyverse)
+library(limma)
+library(pheatmap)
+marker <- read.delim('~/Desktop/Projects/iCCA_ST/marker.txt', header = TRUE, stringsAsFactors = FALSE)
+marker <- as.data.frame(marker)
+marker <- column_to_rownames(marker, var = 'gene')
+pheatmap(marker, cluster_row = FALSE, cluster_col = FALSE, scale = 'row',
+         color = colorRampPalette(c('#3498db', '#f1faee', '#f1c40f'))(200))
+
+ST.FeaturePlot(A_H4, features = 'cell_type', dark.theme = F, pt.size = 1.5, sb.size = 5,
+               cols = c('#7EC7E0', '#FEF8BE', '#3C7F6C', '#7B5CC6', '#BBE4EF', 
+                        '#2D5072', '#665419', '#b2c77e', '#C9933D', '#C9C53D', 
+                        '#D63275', '#DBB642', 'grey', '#2a9d8f', 
+                        '#B5E5C6', '#D2B5E5', '#25BF58', '#E57715', 
+                        '#E8DEA3', '#E8C5A3', '#4C545C', '#7C2927', 
+                        '#8CC93D', '#8BEAD1', '#EA8BEA', '#E51F1A',
+                        '#BC80BD', '#92CDEA'))
+VlnPlot(A_H4, features = 'TFF3', pt.size = 0, group.by = 'cell_type',
+  cols = c('#7EC7E0', '#FEF8BE', '#3C7F6C', '#7B5CC6', '#BBE4EF', 
+           '#2D5072', '#665419', '#b2c77e', '#C9933D', '#C9C53D'))
+DimPlot(A_H4, reduction = 'umap', pt.size = 1.5, group.by = 'cell_type',
+        cols = c('#7EC7E0', '#FEF8BE', '#3C7F6C', '#7B5CC6', '#BBE4EF', 
+                 '#2D5072', '#665419', '#b2c77e', '#C9933D', '#C9C53D'))
+subset <- A_H4[, A_H4@meta.data$seurat_clusters %in% c(2,3,4,5,6,10)]
+table(A_H4@meta.data$cell_type)
+FeatureOverlay(subset, sampleids = 1:2, features = c('SLC2A1'), 
+               pt.size = 1.0, cols = c('#8EABC1', '#F5F7FA', '#C3CFE2', '#556B2F', '#ffd452'),
+               dark.theme = F, type = 'raw') #查看marker
+DotPlot(subset, features = c('SLC2A1', 'NDRG1', 'CSTB', 'SLC6A8', 'KRT17',
+                             'TFF1', 'TFF2', 'TFF3', 'MIF', 'S100P',
+                             'REG4', 'MMP1', 'ANXA10', 'AKR1B10', 'COX7B'),
+        col.min = -2, col.max = 2,
+        scale = T, dot.scale = 3,
+        cols = c("grey90", "red"))+ RotatedAxis()+ 
+  scale_colour_gradient2(low = '#3498db', mid = '#f1faee', high = '#f1c40f') +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.title.y = element_blank())
+data <- DotPlot(subset, features = c('SLC2A1', 'NDRG1', 'CSTB', 'SLC6A8', 'KRT17',
+                                     'TFF1', 'TFF2', 'TFF3', 'MIF', 'S100P',
+                                     'REG4', 'MMP1', 'ANXA10', 'AKR1B10', 'COX7B'), scale = T)$data
+write.table(data, file ="~/Desktop/Projects/iCCA_ST/data.txt", sep = "\t", quote = F )
+
+#
+subset.sce <- as.SingleCellExperiment(subset)
+library(mclust)
+library(RColorBrewer)
+library(slingshot)
+library(SingleCellExperiment)
+sim <- slingshot(subset.sce, clusterLabels = 'cell_type', start.clus = 'P1_Mal_1_SLC2A1', reducedDim = 'UMAP')
+sim
+summary(sim$slingPseudotime_1)
+colors <- colorRampPalette(brewer.pal(11, 'Spectral') [-6])(100)
+plotcol <- colors[cut(sim$slingPseudotime_1, breaks = 100)]
+plotcol[is.na(plotcol)] <- 'lightgrey'
+#plotcol
+plot(reducedDims(sim)$UMAP, col = plotcol, pch = 16, asp = 0.6)
+lines(SlingshotDataSet(sim), lwd = 2, col = brewer.pal(9, 'Set1'))
+legend('right', legend = paste0('lineage', 1:6), col = unique(brewer.pal(6, 'Set1')),
+       inset = 0.8, pch = 16)
+
+library(leidenbase)
+library(monocle3)
+library(S4Vectors)
+data <- GetAssayData(subset, assay = 'RNA', slot = 'counts')
+cell_metadata <- subset@meta.data
+gene_annotation <- data.frame(gene_short_name = rownames(data))
+rownames(gene_annotation) <- rownames(data)
+cds <- new_cell_data_set(data, cell_metadata = cell_metadata, gene_metadata = gene_annotation)
+cds <- preprocess_cds(cds, num_dim = 50)
+plot_pc_variance_explained(cds) 
+cds <- reduce_dimension(cds, preprocess_method = 'PCA')
+plot_cells(cds, reduction_method = 'UMAP', color_cells_by = 'cell_type', cell_size = 1.5, 
+           label_groups_by_cluster = FALSE, label_leaves = TRUE, label_branch_points = FALSE) +
+  scale_color_manual(values = c('#ffbe00', '#1989ac', '#f1bbd5', '#283e56', '#970747', '#ff7a8a', '#c4aff0'))
+
+cds.embed <- cds@int_colData$reducedDims$UMAP
+int.embed <- Embeddings(subset, reduction = 'umap')
+int.embed <- int.embed[rownames(cds.embed),]
+cds@int_colData$reducedDims$UMAP <- int.embed
+plot_cells(cds, reduction_method = 'UMAP', cell_size = 1, color_cells_by = 'cell_type')
+
+cds <- cluster_cells(cds)
+plot_cells(cds, show_trajectory_graph = FALSE)
+plot_cells(cds, color_cells_by = 'cell_type', show_trajectory_graph = FALSE)
+
+cds <- learn_graph(cds)
+plot_cells(cds, color_cells_by = 'cell_type', cell_size = 1, label_groups_by_cluster = FALSE, label_leaves = TRUE, label_branch_points = TRUE) +
+  geom_vline(xintercept = seq(-7,-6,0.25)) + geom_hline(yintercept = seq(0, 1, 0.25))
+
+cds <- order_cells(cds)
+plot_cells(cds, color_cells_by = 'pseudotime', label_groups_by_cluster = FALSE, cell_size = 2.0,
+           label_leaves = FALSE, label_branch_points = FALSE)
+Track_genes <- graph_test(cds, neighbor_graph = 'principal_graph', cores = 6)
+Track_genes <- Track_genes[,c(5,2,3,4,1,6)] %>% filter(q_value < 1e-3)
+write.csv(Track_genes, '~/Desktop/Projects/iCCA_ST/Trajectory_genes.csv', row.names = F)
+
+Track_genes_sig <- Track_genes %>% top_n (n=20, morans_I) %>%
+  pull(gene_short_name) %>% as.character()
+
+plot_genes_in_pseudotime(cds[Track_genes_sig,], color_cells_by = 'cell_type',
+                         cell_size = 0.5, min_expr = 0.5, ncol = 2)
+plot_cells(cds, genes = Track_genes_sig, show_trajectory_graph = FALSE, cell_size = 0.8,
+           label_cell_groups = FALSE, label_leaves = FALSE, raster = T) 
+
+genelist <- pull(Track_genes, gene_short_name) %>% as.character()
+gene_module <- find_gene_modules(cds[genelist,], resolution = 1e-1, cores = 6)
+cell_group <- tibble::tibble(cell=row.names(colData(cds)), cell_group=colData(cds)$cell_type)
+agg_mat <- aggregate_gene_expression(cds, gene_module, cell_group)
+row.names(agg_mat) <- stringr::str_c('Module', row.names(agg_mat))
+pheatmap::pheatmap(agg_mat, scale = 'column', clustering_method = 'ward.D2')
+
+pseudotime <- pseudotime(cds, reduction_method = 'UMAP')
+psudotime <- pseudotime[rownames(subset@meta.data)]
+subset$pseudotime <- pseudotime
+FeaturePlot(subset, reduction = 'umap', features = 'pseudotime')
+
+#Monocle2
+library(monocle)
+# CellDataSet
+expr_matrix <- as(as.matrix(subset@assays[["SCT"]]@counts), 'sparseMatrix')
+p_data <- subset@meta.data
+f_data <- data.frame(gene_short_name = row.names(subset), row.names = row.names(subset))
+# CDS
+pd <- new('AnnotatedDataFrame', data = p_data)
+fd <- new('AnnotatedDataFrame', data = f_data)
+cds <- newCellDataSet(expr_matrix, phenoData = pd, featureData = fd,
+                      lowerDetectionLimit = 0.5, expressionFamily = negbinomial.size())
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+express_genes <- VariableFeatures(subset)
+cds <- setOrderingFilter(cds, express_genes)
+plot_ordering_genes(cds)
+diff <- differentialGeneTest(cds[express_genes,], fullModelFormulaStr = '~cell_type', cores = 2)
+head(diff)
+deg <- subset(diff, qval < 0.01)
+deg <- deg[order(deg$qval, decreasing = F),]
+head(deg)
+ordergene <- rownames(deg)
+cds <- setOrderingFilter(cds, ordergene) 
+plot_ordering_genes(cds)
+cds <- reduceDimension(cds, max_components = 2, method = 'DDRTree')
+cds <- orderCells(cds)
+plot_cell_trajectory(cds, color_by = 'Pseudotime', size = 1, show_backbone = T)
+color = c('#665522', '#b2c77e', '#c8933b', '#c9c53d')
+plot_cell_trajectory(cds, color_by = 'cell_type', size = 1, show_backbone = T) + scale_color_manual(values = color)
+plot_complex_cell_trajectory(cds, x=1, y=2, color_by = 'cell_type', size = 0.1) +
+  scale_color_manual(values = color) + theme(legend.title = element_blank())
+plot_cell_trajectory(cds, color_by = 'State', size = 1, show_backbone = TRUE)
+#
+library(ggpubr)
+df <- cds@phenoData@data
+View(df)
+ggplot(df, aes(Pseudotime, color = cell_type, fill = cell_type)) +
+  geom_density(bw = 0.5, size = 1, alpha = 0.5) + theme_classic2()
+#
+keygenes <- head(ordergene, 10)
+cds_subset <- cds[keygenes,]
+plot_genes_in_pseudotime(cds_subset, color_by = 'Pseudotime')
+genes <- c('SLC2A1', 'NDRG1', 'CSTB', 'SLC6A8', 'KRT17',
+           'TFF1', 'TFF2', 'TFF3', 'MIF', 'S100P',
+           'REG4', 'MMP1', 'ANXA10', 'AKR1B10', 'COX7B')
+plot_genes_in_pseudotime(cds[genes,], color_by = 'cell_type')
+plot_genes_violin(cds[genes,], grouping = 'cell_type', color_by = 'cell_type')
+Time_diff <- differentialGeneTest(cds[ordergene,], cores = 1, fullModelFormulaStr = '~sm.ns(Pseudotime)')
+Time_diff <- Time_diff[,c(5,2,3,4,1,6,7)] #把gene放前面，也可以不放
+write.csv(Time_diff, '~/Desktop/Projects/iCCA_ST/Time_diff_all_P3.csv', row.names = F)
+Time_genes <- Time_diff %>% pull(gene_short_name) %>% as.character()
+p <- plot_pseudotime_heatmap(cds[Time_genes], num_clusters = 9, show_rownames = FALSE, return_heatmap = T)
+p$tree_row
+clusters <- cutree(p$tree_row, k = 9)
+clustering <- data.frame(clusters)
+clustering[,1] <- as.character(clustering[,1])
+colnames(clustering) <- 'Gene_clusters'
+table(clustering)
+write.csv(clustering, '~/Desktop/Projects/iCCA_ST/Time_clustering_all_P3.csv', row.names = T)
+
+#
+library(gprofiler2)
+library(Hmisc)
+gene <- read.delim('~/Desktop/Projects/iCCA_ST/gene.txt', header = TRUE, stringsAsFactors = FALSE)[[1]]
+gsprr <- gost(gene,sources = "GO:BP", significant = FALSE)
+gsprr <- gsprr$result
+gsprr<- gsprr %>% top_n(n = 10, wt = -log10(p_value))
+gsprr$id <- capitalize(gsprr$term_name)
+co <- c("grey90","green4","dark green")
+ggplot(data = gsprr,aes(x=intersection_size,y=id,fill=-log10(p_value))) + 
+  geom_bar(stat = "identity") +
+  scale_y_discrete(limits=rev(gsprr$id)) +
+  scale_fill_gradientn(limits=c(1,5),colours = co) +
+  labs(x="Gene_number", y="GO:BP") +
+  theme(axis.text = element_text(colour = "black")) +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),)+
+  geom_text(data = gsprr,aes(x=intersection_size+5.5,y=id),label=round(-log10(gsprr$p_value),3))
+
+#KEGG
+#BiocManager::install('clusterProfiler')
+library(clusterProfiler)
+#BiocManager::install('org.Hs.eg.db')
+#install.packages('IRanges')
+library(org.Hs.eg.db) 
+library(dplyr)
+library(ggplot2)
+
+cluster <- bitr(gene, fromType = 'SYMBOL', toType = c('ENTREZID', 'ENSEMBL'), OrgDb = 'org.Hs.eg.db')
+ENTREZID <- pull(cluster, ENTREZID)
+KEGG <- enrichKEGG(gene = ENTREZID,
+                   organism = "hsa",
+                   keyType = "kegg",
+                   pvalueCutoff = 0.05,
+                   qvalueCutoff = 0.05)
+KEGG <- setReadable(KEGG, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+KEGG <- as.data.frame(KEGG)
+rownames(KEGG) <- 1:nrow(KEGG)
+KEGG$order = factor(rev(as.integer(rownames(KEGG))), labels = rev(KEGG$Description))
+
+ggplot(KEGG, aes(y = order, x = Count, fill = p.adjust)) + 
+  geom_bar(stat = 'identity', width = 0.7) + 
+  scale_fill_gradient(low = 'dark green', high = 'grey90') + 
+  labs(title = 'kegg pathways enrichment',
+       x = 'gene number',
+       y = 'pathways') +
+  theme(axis.title.x = element_text(face = 'bold', size = 16),
+        axis.title.y = element_text(face = 'bold', size = 16),
+        legend.title = element_text(face = 'bold', size = 16)) +
+  theme_bw()
+
+ggplot(KEGG, aes(y = order, x = Count)) + 
+  geom_point(aes(size = Count, color = -1*p.adjust)) +
+  scale_color_gradient(low = '#264653', high = '#EF4447') +
+  labs(color = expression(p.adjust, size = 'Count'),
+       x = 'gene number', y = 'pathways', title = 'kegg pathway enrichment') +
+  theme_bw()
+
+
+#SPOTlight
+library(SPOTlight)
+library(ggplot2)
+library(SingleCellExperiment)
+library(SpatialExperiment)
+library(scater)
+library(scran)
+
+samples = list.files('~/Desktop/Projects/iCCA_ST/DataSet/GSE138709_RAW')
+setwd('~/Desktop/Projects/iCCA_ST/DataSet/GSE138709_RAW')
+list <- list()
+for (i in 1:length(samples)) { 
+  list[[i]]= CreateSeuratObject(counts = read.csv(samples[[i]],header = T,row.names = 1)
+  )
+}
+for (i in 1:length(list)) {
+  list[[i]] <- PercentageFeatureSet(list[[i]], "^MT-", col.name = "percent_mito")
+  list[[i]] <- subset(list[[i]], subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent_mito < 15 
+  )
+  list[[i]] <- NormalizeData(list[[i]], verbose = FALSE)
+  list[[i]] <- FindVariableFeatures(list[[i]], selection.method = "vst", 
+                                    nfeatures = 3000, verbose = FALSE)
+}
+anchors <- FindIntegrationAnchors(object.list = list, dims = 1:20, 
+                                  reduction = "cca")
+saveRDS(anchors,file = "~/Desktop/Projects/iCCA_ST/DataSet/anchors_iCCA.rds")
+anchors <- readRDS('~/Desktop/Projects/iCCA_ST/DataSet/anchors_iCCA.rds')
+merge_iCCA <- IntegrateData(anchorset = anchors, dims = 1:20, new.assay.name = "iCCA")
+merge_iCCA <- Seurat::SCTransform(merge_iCCA)
+merge_iCCA <- Seurat::NormalizeData(merge_iCCA)
+merge_iCCA <- Seurat::FindVariableFeatures(merge_iCCA, selection.method = 'vst', nfeatures = 3000)
+all.genes <- rownames(merge_iCCA)
+merge_iCCA <- Seurat::ScaleData(merge_iCCA, features = all.genes)
+merge_iCCA <- Seurat::RunPCA(merge_iCCA, features = VariableFeatures(merge_iCCA), verbose = FALSE)
+DimPlot(merge_iCCA, reduction = 'pca', group.by = 'orig.ident')
+ElbowPlot(merge_iCCA)
+merge_iCCA <- RunHarmony(merge_iCCA, 'orig.ident', plot_convergence = TRUE)
+DimPlot(merge_iCCA, reduction = 'harmony', group.by = 'orig.ident')
+merge_iCCA <- FindNeighbors(merge_iCCA, dims = 1:15, reduction = 'harmony')
+merge_iCCA <- FindClusters(merge_iCCA, resolution = 0.8)
+table(merge_iCCA@meta.data$seurat_clusters)
+merge_iCCA <- RunTSNE(merge_iCCA, dims = 1:15)
+DimPlot(merge_iCCA, reduction = "tsne") +
+  scale_color_manual(values = c('#7B5CC6', '#3C7F6C', '#E57715', '#25BF58', '#D63275', '#DBB642', '#665419',
+                                'grey',  '#7EC7E0', '#2D5072', '#92CDEA', '#B5E5C6', '#D2B5E5', '#E8DEA3',
+                                '#E8C5A3', '#E51F1A', '#7C2927', '#C9933D', '#C9C53D', '#8CC93D', '#8BEAD1',
+                                '#EA8BEA', '#4C545C', '#b2c77e', '#2a9d8f', '#BC80BD', '#BBE4EF', '#FEF8BE'))
+
+markers <- c("CD79A", 'CD19', 'MS4A1', #B-cell
+             "FXYD2", #Cholangiocyte
+             "CD1C", 'FCER1A', #Dendritic
+             "ENG", #Endothelial
+             "ACTA2", "FAP", #Fibroblast
+             "APOC3", "ALB", #Hepatocyte
+             "CD14", "CD68", "CD163", #Macrophage
+             "KRT19", "EPCAM", #Malignant
+             "CD7", "KLRF1", 'NKG7', #NK cell
+             "CD3D", #T-cell
+             "MZB1", #Plasma B
+             "CD4",
+             "CD8A", "CD8B",
+             'GZMK', 'MKI67') 
+DotPlot(merge_iCCA,features = markers)
+cluster2celltype <- c('0' = 'Mal/chola', '1' = 'T', '2' = 'T', '3' = 'Mal/chola',
+                      '4' = 'Macrophage', '5' = 'Macrophage', '6' = 'T', '7' = 'NK',
+                      '8' = 'Proliferating', '9' = 'Endothelia', '10' = 'Mal/chola', '11' = 'DC',
+                      '12' = 'Mal/chola', '13'= 'Mal/chola', '14' = 'Proliferating', '15' = 'PlasmaB',
+                      '16' = 'Hepatocyte', '17' = 'Fibroblast', '18' = 'B', '24' = 'Mal/chola')
+merge_iCCA[['cell_type']] = unname(cluster2celltype[merge_iCCA@meta.data$seurat_clusters])
+iCCA <- subset(merge_iCCA@meta.data, seurat_clusters != c('19', '20', '21', '22', '23'))
+iCCA <- subset(merge_iCCA, cells = row.names(iCCA))
+iCCA1 <- subset(iCCA@meta.data, cell_type != 'NA')
+iCCA1 <- subset(iCCA, cells = row.names(iCCA1))
+
+DimPlot(iCCA, reduction = 'tsne', group.by = 'cell_type', label = TRUE, pt.size = 1.0) +
+  scale_color_manual(values = c('#7B5CC6', '#3C7F6C', '#E57715', '#25BF58', '#D63275', '#DBB642', '#665419',
+                                'grey',  '#7C2927', '#2D5072', '#92CDEA', '#B5E5C6', '#D2B5E5', '#E8DEA3'))
+table(iCCA1@meta.data$cell_type)
+prop.table(table(iCCA@meta.data$cell_type))
+saveRDS(iCCA1,file = "~/Desktop/Projects/iCCA_ST/DataSet/merge_sc_iCCA.rds")
+iCCA <- readRDS('~/Desktop/Projects/iCCA_ST/DataSet/merge_sc_iCCA.rds')
+Idents(iCCA) <- 'cell_type'
+cluster_marker <- Seurat::FindAllMarkers(iCCA, verbose = TRUE, only.pos = TRUE, assay = 'SCT', slot = 'data')
+cluster_marker_a <- cluster_marker %>% filter(avg_log2FC > 1 & pct.1 > 0.7)
+#cluster_marker_a$cluster <- gsub(pattern = '[[:punct:]]|[[:blank:]]', '.', x = cluster_marker_a$cluster, perl = TRUE)
+decon_A_H4 <- SPOTlight(x = iCCA, y = A_H4@assays$Spatial@counts, groups = as.character(iCCA$cell_type),
+                        mgs = cluster_marker_a, weight_id = 'avg_log2FC', cl_n = 100, hvg = 3000,
+                        ntop = NULL, transf = 'uv', clust_vr = 'cell_type', 
+                        method = 'nsNMF', min_cont = 0,01)
+unique(as.character(iCCA$cell_type)) %in% unique(cluster_marker_a$cluster)
+mod_ls <- trainNMF(x = iCCA, y = data_A_H4@assays$Spatial@counts,
+                   groups = iCCA$cell_type, mgs = cluster_marker_a,
+                   weight_id = 'avg_log2FC', group_id = 'cluster', gene_id = 'gene')
+res <- runDeconvolution(x = D_SH8@assays$Spatial@counts, mod = mod_ls[['mod']], ref = mod_ls[['topic']])
+head(mat <- res$mat)[, seq_len(3)]
+plotTopicProfiles(x = mod_ls[['mod']], y = iCCA$cell_type, facet = FALSE, min_prop = 0.01, ncol = 1) +
+  theme(aspect.ratio = 1)
+plotTopicProfiles(x = mod_ls[['mod']], y = iCCA$cell_type, facet = TRUE, min_prop = 0.01, ncol = 6)
+library(NMF)
+sign <- basis(mod_ls[['mod']])
+colnames(sign) <- paste0('Topic', seq_len(ncol(sign)))
+head(sign)
+#install.packages('ggcorrplot')
+plotCorrelationMatrix(mat)
+plotInteractions(mat, which = 'heatmap', metric = 'prop')
+plotInteractions(mat, which = 'heatmap', metric = 'jaccard')
+plotInteractions(mat, which = 'network')
+ct <- colnames(mat)
+mat[mat < 0.1] <- 0
+paletteMartin <- c('#92CDEA', '#3C7F6C', '#E57715', '#25BF58', '#D63275', '#DBB642', '#665419',
+                   'grey',  '#7C2927', '#2D5072', '#7B5CC6',  '#B5E5C6', '#D2B5E5', '#E8DEA3')
+pal <- colorRampPalette(paletteMartin)(length(ct))
+names(pal) <- ct
+plotSpatialScatterpie(x = D_SH8, y = mat, cell_types = colnames(mat), 
+                      img = FALSE, scatterpie_alpha = 1, pie_scale = 0.4, degrees = -90, axis = 'h') +
+  scale_fill_manual(values = pal, breaks = names(pal))
+write.table(mat, file ="~/Desktop/Projects/iCCA_ST/mat.txt", sep = "\t", quote = F )
+
+
+#Boxplot
+ggplot(Book1, aes(x=group, y=ratio)) + geom_boxplot() +
+  geom_dotplot(binaxis = 'y', stackdir = 'center', dotsize = 1.0, position = position_dodge(1)) +
+  scale_x_discrete(limits = c('Immune', 'Fibroblast', 'Macrophage'))
+
+#
+library(harmony)
+subset_Mac <- subset(iCCA, cell_type == 'Macrophage')
+subset_Mac <- RunPCA(subset_Mac, verbose = FALSE)
+DimPlot(subset_Mac, reduction = 'pca', pt.size = .1, group.by = 'orig.ident')
+DimHeatmap(subset_Mac, dims = 1:15, cells = 500, balanced = TRUE)
+ElbowPlot(subset_Mac)
+subset_Mac <- RunHarmony(subset_Mac, 'orig.ident', plot_convergence = TRUE)
+DimPlot(subset_Mac, reduction = 'harmony', pt.size = .1, group.by = 'orig.ident')
+subset_Mac <- FindNeighbors(subset_Mac, reduction = 'harmony', dims = 1:10)
+subset_Mac <- FindClusters(subset_Mac, resolution = 0.3, verbose = T)
+subset_Mac <- RunUMAP(subset_Mac, reduction = 'harmony', dims = 1:10)
+DimPlot(subset_Mac, reduction = 'umap', cols = c('#e76f51', '#264653', '#e9c46a', '#3498db', '#f1faee', '#2a9d8f'))
+subset_Mac <- RunTSNE(subset_Mac, reduction = 'harmony', dims = 1:10)
+DimPlot(subset_Mac, reduction = 'tsne', group.by = 'cell_type',
+        cols = c('#264653', '#e9c46a', '#f1faee', '#2a9d8f', '#3498db', '#e76f51'), pt.size = 1.5)
+DotPlot(subset_Mac, features = c('IL1B', 'CD86', 'CD163', 'CSF1R', 'MARCO', 'SPP1', 'MMP9',
+                                'HS3ST2', 'CCL18', 'PCNA', 'S100A4', 'S100A8', 'S100A9'),
+        col.min = -2, col.max = 2,
+        scale = T, dot.scale = 8,
+        cols = c("grey90", "red"))+ RotatedAxis()+ 
+  scale_colour_gradient2(low = '#3498db', mid = '#f1faee', high = '#f1c40f') +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.title.y = element_blank())
+
+cluster_marker <- Seurat::FindAllMarkers(subset_Mac, verbose = TRUE, only.pos = TRUE, assay = 'SCT', slot = 'data')
+cluster_marker_a <- cluster_marker %>% filter(avg_log2FC > 0.6 & pct.1 > 0.7)
+cluster2celltype <- c('0' = 'Mac_S100P', '1' = 'Mac_CD86', '2' = 'Mac_SPP1', '3' = 'Mac_CD163',
+                      '4' = 'Mac_CD86', '5' = 'Mac_SPP1')
+subset_Mac[['cell_type']] = unname(cluster2celltype[subset_Mac@meta.data$seurat_clusters])
+Idents(subset_Mac) <- 'cell_type'
+cluster_marker <- Seurat::FindAllMarkers(subset_Mac, verbose = TRUE, only.pos = TRUE, assay = 'SCT', slot = 'data')
+cluster_marker_a <- cluster_marker %>% filter(avg_log2FC > 0.8 & pct.1 > 0.7)
+unique(as.character(subset_Mac$cell_type)) %in% unique(cluster_marker_a$cluster)
+mod_ls <- trainNMF(x = subset_Mac, y = data_D_SH8@assays$Spatial@counts,
+                   groups = subset_Mac$cell_type, mgs = cluster_marker_a,
+                   weight_id = 'avg_log2FC', group_id = 'cluster', gene_id = 'gene')
+res <- runDeconvolution(x = data_D_SH8@assays$Spatial@counts, mod = mod_ls[['mod']], ref = mod_ls[['topic']])
+head(mat <- res$mat)[, seq_len(3)]
+plotTopicProfiles(x = mod_ls[['mod']], y = subset_Mac$cell_type, facet = FALSE, min_prop = 0.01, ncol = 1) +
+  theme(aspect.ratio = 1)
+plotTopicProfiles(x = mod_ls[['mod']], y = subset_Mac$cell_type, facet = TRUE, min_prop = 0.01, ncol = 6)
+library(NMF)
+sign <- basis(mod_ls[['mod']])
+colnames(sign) <- paste0('Topic', seq_len(ncol(sign)))
+head(sign)
+plotCorrelationMatrix(mat)
+plotInteractions(mat, which = 'heatmap', metric = 'prop')
+plotInteractions(mat, which = 'heatmap', metric = 'jaccard')
+plotInteractions(mat, which = 'network')
+ct <- colnames(mat)
+mat[mat < 0.1] <- 0
+paletteMartin <- c('#92CDEA', '#3C7F6C', '#E57715', '#25BF58', '#D63275', '#DBB642', '#665419',
+                   'grey',  '#7C2927', '#2D5072', '#7B5CC6',  '#B5E5C6', '#D2B5E5', '#E8DEA3')
+pal <- colorRampPalette(paletteMartin)(length(ct))
+names(pal) <- ct
+plotSpatialScatterpie(x = data_D_SH8, y = mat, cell_types = colnames(mat), 
+                      img = FALSE, scatterpie_alpha = 1, pie_scale = 0.4, degrees = -90, axis = 'h') +
+  scale_fill_manual(values = pal, breaks = names(pal))
+write.table(mat, file ="~/Desktop/Projects/iCCA_ST/mat.txt", sep = "\t", quote = F )
+cell_type <- D_SH8@meta.data[["cell_type"]]
+write.table(cell_type, file ="~/Desktop/Projects/iCCA_ST/cell_type.txt", sep = "\t", quote = F )
+
+dimname <- D_SH8@assays[["RNA"]]@counts@Dimnames[[2]]
+write.table(dimname, file ="~/Desktop/Projects/iCCA_ST/dimname.txt", sep = "\t", quote = F )
+
+library(vioplot)
+table(Book1$group)
+range(Book1$value)
+x1 = Book1$value[Book1$group == 'Mac_CD163']
+x2 = Book1$value[Book1$group == 'Mac_CD86']
+x3 = Book1$value[Book1$group == 'Mac_S100P']
+x4 = Book1$value[Book1$group == 'Mac_SPP1']
+vioplot(x1,x2,x3,x4, names=c("Mac_CD163","Mac_CD86","Mac_S100P", "Mac_SPP1"),col="gold")
+vioplot(value~group, data = Book1)
+#
+library(ggplot2)
+ggplot(Book1, aes(group, value, fill = group)) + geom_violin() +
+  scale_fill_manual(vaules = c('red', 'yellow', 'blue')) +
+  facet_wrap(.~cell_type, ncol = 4)
+ggplot(Book1, aes(group, value, fill = group)) + geom_violin() +
+  geom_boxplot(width = 0.1, position = position_identity(), fill = 'white') +
+  stat_summary(fun.y = 'mean', geom = 'point', shape = 23, size = 4, fill = 'red') +
+  theme_bw()
+library(ggpubr)
+ggviolin(Book1, x = 'group', y = 'value', fill = 'group',
+         palette = c('red', 'yellow', 'blue', 'gray'), 
+         add = 'boxplot', add.params = list(fill = 'white'))
+
+
+#stereoscope
+write.table(as.matrix(subset.list@assays$RNA@data), '~/Desktop/Projects/iCCA_ST/count.txt', sep = '\t', quote = F)
+meta_data <- cbind(rownames(subset.list@meta.data), subset.list@meta.data[, 'labels', drop = F])
+meta_data <- as.matrix(meta_data)
+write.table(meta_data, '~/Desktop/Projects/iCCA_ST/meta.txt', sep = '\t', quote = F, row.names = F)
+
+#terminal，run stereoscope
+scope <- read.table("~/Desktop/Projects/iCCA_ST/stereoscope/res/iCCA_3/W.2022-03-14092818.592299.tsv",
+                    sep = "\t", header = T, row.names = 1, check.names = T)
+select <- colnames(D_SH8)
+scope <- scope[select,]
+library(RColorBrewer)
+celltype <- colnames(scope)
+celltypelist <- list(celltype)
+celltypebinary <- list(celltype)
+for(i in 1:length(celltype)){
+  celltypelist[[i]]<- subset(scope,select= celltype[i])
+  D_SH8 <- AddMetaData(D_SH8,metadata = celltypelist[[i]],col.name = paste0(celltype[i],"_percent"))
+  pdf(file = paste0(celltype[i],".pdf"))
+  p1 <- FeatureOverlay(D_SH8, features = paste0(celltype[i],"_percent"), pt.alpha = 0.7, indices = 1, pt.size = 2.1, cols = brewer.pal(9, 'Oranges'), sample.label = F)
+  p2 <- VlnPlot(D_SH8,features = paste0(celltype[i],"_percent"),pt.size = 0)&
+    theme(axis.title.x = element_blank()) & 
+    geom_boxplot(width=0.3, outlier.size = 0.2)
+  print(p1)
+  print(p2)
+  dev.off()
+}
+
+
+#CellChat-V2
+library(CellChat)
+
+data.input = Seurat::GetAssayData(A_H4, slot = 'data', assay = 'SCT')
+meta = data.frame(labels = Idents(A_H4), row.names = names(Idents(A_H4)))
+unique(meta$labels)
+
+#
+data_A_H4 <- Seurat::Read10X_h5(filename = '~/Desktop/Projects/iCCA_ST/DataSet/Data/1_SpaceRanger_analysis/2_expression/A_H4.filtered_feature_bc_matrix.h5')
+data_A_H4 <- Seurat::CreateSeuratObject(counts = data_A_H4, project = 'ST', assay = 'Spatial')
+data_A_H4$slice <- 1
+data_A_H4$region <- 'ST1'
+imagpath <- '~/Desktop/Projects/iCCA_ST/DataSet/Data/1_SpaceRanger_analysis/2_expression/A_H4.spatial'
+img <- Seurat::Read10X_Image(image.dir = imagpath)
+Seurat::DefaultAssay(object = img) <- 'Spatial'
+img <- img[colnames(x = data_A_H4)]
+data_A_H4[['image']] <- img
+data_A_H4
+#spatial.locs <- D_SH8@tools$Staffli@meta.data
+spatial.locs = Seurat::GetTissueCoordinates(data_A_H4, scale = NULL, cols = c('imagerow', 'imagecol'))
+# Scale factors and spot diameters
+scale.factors = jsonlite::fromJSON(txt = file.path('~/Desktop/Projects/iCCA_ST/DataSet/Data/1_SpaceRanger_analysis/2_expression/A_H4.spatial', 
+                                                   'scalefactors_json.json'))
+scale.factors = list(spot.diameter = 65, spot = scale.factors$spot_diameter_fullres, # these two information are required
+                     fiducial = scale.factors$fiducial_diameter_fullres, hires = scale.factors$tissue_hires_scalef, 
+                     lowres = scale.factors$tissue_lowres_scalef) # these three information are not required
+cellchat <- createCellChat(object = data.input, meta = meta, group.by = 'labels',
+                           datatype = 'spatial', coordinates = spatial.locs, scale.factors = scale.factors) 
+CellChatDB <- CellChatDB.human
+# use all CellChatDB for cell-cell communication analysis
+CellChatDB.use <- CellChatDB # simply use the default CellChatDB
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+future::plan('multisession', workers = 1) 
+
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+cellchat <- computeCommunProb(cellchat, type = 'triMean', trim = 0.1, 
+                              distance.use = T, scale.distance = 0.01) 
+#cell-cell communication
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+cellchat <- computeCommunProbPathway(cellchat)
+cellchat <- aggregateNet(cellchat)
+groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd = TRUE)
+netVisual_circle(cellchat@net$count, vertex.weight = rowSums(cellchat@net$count),
+                 weight.scale = T, label.edge = F, vertex.label.color = 'white')
+netVisual_circle(cellchat@net$weight,vertex.weight = rowSums(cellchat@net$weight),
+                 weight.scale = T, label.edge = F, vertex.label.color = 'white')
+netVisual_heatmap(cellchat, measure = 'count', color.heatmap = 'Blues')
+netVisual_heatmap(cellchat, measure = 'weight', color.heatmap = 'Blues')
+#
+cellchat@netP$pathways
+pathwaysshow <- c("SPP1")
+levels(cellchat@idents)
+vertex.receiver = c(1,2,3,6)
+netVisual_aggregate(cellchat, signaling = pathwaysshow, vertex.label.color = 'white',
+                    vertex.receiver = vertex.receiver, layout = 'hierarchy')
+par(mfrow=c(1,1))
+netVisual_aggregate(cellchat, signaling = pathwaysshow, layout = 'circle', vertex.label.color = 'white')
+netVisual_aggregate(cellchat, signaling = pathwaysshow, layout = 'spatial', 
+                    edge.weight.max = 5, vertex.size.max = 1,
+                    alpha.image = 0.15, vertex.label.cex = 3.5)
+# Compute the network centrality scores
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+# Visualize the computed centrality scores using heatmap, allowing ready identification of major signaling roles of cell groups
+par(mfrow=c(1,1))
+netAnalysis_signalingRole_network(cellchat, signaling = pathwaysshow, 
+                                  width = 8, height = 2.5, font.size = 10)
+
+netVisual_bubble(cellchat, sources.use = c(8), 
+                 targets.use = c(1,3,4,5), signaling = c('COLLAGEN', 'SPP1', 'MIF', 'EGF', 'ICAM', 'WNT', 'NECTIN',
+                                                         'TGFb', 'NOTCH', 'ITGB2', 'CXCL', 'PECAM1', 'VEGF', 'PDGF'), remove.isolate = FALSE)
+# Take an input of a ligand-receptor pair and show expression in binary
+spatialFeaturePlot(cellchat, pairLR.use = "SPP1_CD44", point.size = 1.5, 
+                   do.binary = TRUE, cutoff = 0.05, enriched.only = F, 
+                   color.heatmap = "Reds", direction = 1)
+
+library(ggpubr)
+df <- data.frame (
+  group = c("Mal_1_SLC2A1", 'Mal_2_TFF', 'Mal_3_REG4', 'Mal_4_necrotic', 'Other'),
+  value = c(33.74, 18.31, 17.48, 30.47, 51.26)
+ggpie(df, "value", label = "group", fill = "group", color = "white")
+
+
+# single cell data migration
+library(harmony)
+samples = list.files('~/Desktop/CCA_ST/GSE138709_RAW')
+setwd('~/Desktop/CCA_ST/GSE138709_RAW')
+list <- list()
+for (i in 1:length(samples)) { 
+  list[[i]]= CreateSeuratObject(counts = read.csv(samples[[i]],header = T,row.names = 1)
+  )
+}
+for (i in 1:length(list)) {
+  list[[i]] <- PercentageFeatureSet(list[[i]], "^MT-", col.name = "percent_mito")
+  list[[i]] <- subset(list[[i]], subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent_mito < 15 
+  )
+  list[[i]] <- NormalizeData(list[[i]], verbose = FALSE)
+  list[[i]] <- FindVariableFeatures(list[[i]], selection.method = "vst", 
+                                    nfeatures = 5000, verbose = FALSE)
+}
+anchors <- FindIntegrationAnchors(object.list = list, dims = 1:20, 
+                                  reduction = "cca")
+saveRDS(anchors,file = "~/Desktop/Projects/iCCA_ST/DataSet/Data/anchors_iCCA.rds")
+anchors <- readRDS('~/Desktop/Projects/iCCA_ST/DataSet/Data/anchors_iCCA.rds')
+merge_iCCA <- IntegrateData(anchorset = anchors, dims = 1:20, new.assay.name = "iCCA")
+merge_iCCA <- SCTransform(merge_iCCA)
+merge_iCCA <- FindVariableFeatures(merge_iCCA, selection.method = 'vst', nfeatures = 5000)
+all.genes <- rownames(merge_iCCA)
+merge_iCCA <- ScaleData(merge_iCCA, features = all.genes)
+merge_iCCA <- RunPCA(merge_iCCA, features = VariableFeatures(merge_iCCA))
+DimPlot(merge_iCCA, reduction = 'pca', group.by = 'orig.ident')
+ElbowPlot(merge_iCCA)
+merge_iCCA <- RunHarmony(merge_iCCA, 'orig.ident', plot_convergence = TRUE)
+DimPlot(merge_iCCA, reduction = 'harmony', group.by = 'orig.ident')
+merge_iCCA <- FindNeighbors(merge_iCCA, dims = 1:15, reduction = 'harmony')
+merge_iCCA <- FindClusters(merge_iCCA, resolution = 0.6) 
+table(merge_iCCA@meta.data$seurat_clusters)
+merge_iCCA <- RunTSNE(merge_iCCA, dims = 1:15)
+DimPlot(merge_iCCA, reduction = "tsne",label = T,label.size = 5)
+merge_iCCA <- RunUMAP(merge_iCCA, dims = 1:15)
+DimPlot(merge_iCCA, reduction = "umap",label = T,label.size = 5)
+markers <- c("CD79A", #B-cell
+             "FXYD2", #Cholangiocyte
+             "CD1C", #Dendritic
+             "ENG", #Endothelial
+             "ACTA2", #Fibroblast
+             "APOC3", #Hepatocyte
+             "CD14", #Macrophage
+             "KRT19", #Malignant
+             "CD7", #NK cell
+             "CD3D") #T-cell
+DotPlot(merge_iCCA,features = markers)
+cluster2celltype <- c('0' = 'Malignant', '1' = 'T cell', '2' = 'T cell', '3' = 'Macrophage',
+                      '4' = 'Malignant', '5' = 'T cell', '6' = 'Malignant', '7' = 'NK cell',
+                      '8' = 'Macrophage', '9' = 'Endothelia', '10' = 'B cell', '11' = 'Hepatocyte',
+                      '12' = 'Fibroblast', '13'= 'B cell', '14' = 'Dendritic', '15' = 'T cell',
+                      '16' = 'Cholangiocyte', '17' = 'Cholangiocyte')
+merge_iCCA[['cell_type']] = unname(cluster2celltype[merge_iCCA@meta.data$seurat_clusters])
+DimPlot(merge_iCCA, reduction = 'tsne', group.by = 'cell_type', label = TRUE, pt.size = 0.5) + NoLegend() +
+  scale_color_manual(values = c('#0E9396', '#616D38', '#C96928', '#BA4126', '#015F73', '#94D2BD',
+                                '#EE9C21', '#E9D8A6', '#08151B', '#E5E5E5'))
+table(merge_iCCA@meta.data$cell_type)
+prop.table(table(merge_iCCA@meta.data$cell_type))
+
+#
+cellAnnota <- subset(merge_iCCA@meta.data, select = 'cell_type')
+exprMatrix <- as.matrix(GetAssayData(merge_iCCA, slot = 'counts'))
+write.table(t_exprMatrix, '~/Desktop/Projects/iCCA_ST/iCCAexprMatrix.tsv', col.names = NA, sep = '\t')
+write.table(cellAnnota, '~/Desktop/Projects/iCCA_ST/iCCAcellAnnota.tsv', col.names = F, sep = '\t')
+length(exprMatrix[,1]) 
+length(exprMatrix[1,])
+n = length(exprMatrix[1,])*length(exprMatrix[,1])
+n
+t_exprMatrix = t(exprMatrix)
+
+library(data.table) 
+data <- fread('~/Desktop/Projects/iCCA_ST/GSE138709_RAW/GSM4116579_ICC_18_Adjacent_UMI.csv.gz')
+write.table(merge_iCCA@assays[["RNA"]]@counts, file = "~/Desktop/CCA_ST/iCCA_cnt_data.tsv", 
+            sep = '\t', quote = F, row.names = TRUE, col.names = TRUE)
+
+subset_Mac <- subset(merge_iCCA, cell_type == 'Macrophage')
+subset_Mal <- subset(merge_iCCA, cell_type == 'Malignant')
+options(future.globals.maxSize = 8000 * 1024^2)
+subset_Mac <- RunPCA(subset_Mac, verbose = FALSE)
+DimPlot(subset_Mac, reduction = 'pca', pt.size = .1, group.by = 'orig.ident')
+DimHeatmap(subset_Mac, dims = 1:15, cells = 500, balanced = TRUE)
+ElbowPlot(subset_Mac)
+subset_Mac <- RunHarmony(subset_Mac, 'orig.ident', plot_convergence = TRUE)
+DimPlot(subset_Mac, reduction = 'harmony', pt.size = .1, group.by = 'orig.ident')
+subset_Mac <- FindNeighbors(subset_Mac, reduction = 'harmony', dims = 1:10)
+subset_Mac <- FindClusters(subset_Mac, resolution = 0.1, verbose = FALSE)
+subset_Mac <- RunUMAP(subset_Mac, reduction = 'harmony', dims = 1:5)
+DimPlot(subset_Mac, reduction = 'umap', cols = c('#e76f51', '#264653', '#e9c46a'))
+subset_Mac <- RunTSNE(subset_Mac, reduction = 'harmony', dims = 1:10)
+DimPlot(subset_Mac, reduction = 'tsne', cols = c('#e76f51', '#264653', '#e9c46a', '#2a9d8f', '#f4a261', '#E44649'))
+DimPlot(subset_Mac, reduction = 'umap', group.by = 'orig.ident')
+marker_Mac <- FindAllMarkers(subset_Mac, only.pos = FALSE, min.pct = 0.25, logfc.threshold = 0.25, test.use = 'wilcox')
+write.csv(marker_Mac, '~/Desktop/Projects/iCCA_ST/DataSet/Data/marker_Mac.csv')
+topgene <- marker_Mac %>% group_by(cluster) %>% top_n(n = 30, wt = avg_log2FC)
+topgene
+DoHeatmap(subset_Mac, features = topgene$gene, size = 2) + NoLegend()
+table(subset_Mac@meta.data$orig.ident)
+
+library(RColorBrewer)
+mat <- GetAssayData(subset_Mac, slot = 'scale.data')
+cluster_info <- sort(subset_Mac$seurat_clusters)
+mat <- as.matrix(mat[topgene$gene,names(cluster_info)])
+dim(mat)
+Heatmap(mat, col = c('#a8dadc', '#f1faee', '#e63946'), cluster_columns = FALSE, cluster_rows = FALSE, show_column_names = FALSE)
+Heatmap(mat, col = colorRampPalette(brewer.pal(9,'RdBu'))(50), cluster_columns = FALSE, cluster_rows = FALSE, show_column_names = FALSE)
+DotPlot(subset_Mac, features = c('IL1B', 'CD86', 'CD163', 'CSF1R', 'MARCO', 'CD40', 'CCL2'), cols = c('lightgrey', '#21908C')) + RotatedAxis() # + coord_flip()
+
+cellAnnota_Mac <- subset(subset_Mac@meta.data, select = 'seurat_clusters')
+exprMatrix_Mac <- as.matrix(GetAssayData(subset_Mac, slot = 'counts'))
+t_exprMatrix_Mac = t(exprMatrix_Mac)
+write.table(exprMatrix_Mac, '~/Desktop/Projects/iCCA_ST/exprMatrix_Mac.txt', col.names = NA, sep = '\t')
+write.table(cellAnnota_Mac, '~/Desktop/Projects/iCCA_ST/cellAnnota_Mac.txt', col.names = F, sep = '\t')
+
+write.table(as.matrix(merge_iCCA@assays$RNA@data), '~/Desktop/CCA_ST/count.txt', sep = '\t', quote = F)
+meta_data <- cbind(rownames(merge_iCCA@meta.data), merge_iCCA@meta.data[, 'cell_type', drop = F])
+meta_data <- as.matrix(meta_data)
+write.table(meta_data, '~/Desktop/Projects/iCCA_ST/meta.txt', sep = '\t', quote = F, row.names = F)
+
+#DSP heatmap
+library(tidyverse)
+DSP_exp_matrix <- as.data.frame(DSP_exp_matrix)
+DSP_exp_matrix <- column_to_rownames(DSP_exp_matrix, var = "Gene")
+
+SampleInfor <- select(SampleInfor, ROI, Section_ID, Factor)
+SampleInfor <- column_to_rownames(SampleInfor, var = "ROI")
+par(mar = c(8,3,3,3))
+boxplot(DSP_exp_matrix,
+        outline = FALSE,
+        las = 2)
+ann_colors <- list(Section_ID <- c('DarkRed', 'Green'),
+                   Factor <- c("PanCK" = "Green", "CD3" = "Yellow"))
+head(ann_colors)
+library(limma)
+library(pheatmap)
+DSP_exp_matrix <- normalizeBetweenArrays(DSP_exp_matrix)
+DSP_exp_matrix <- as.data.frame(DSP_exp_matrix)
+pheatmap(DSP_exp_matrix,scale = "row",
+         show_colnames = T, show_rownames = T, border_color = "Gray",
+         annotation = select(SampleInfor, Section_ID, Factor),
+         color = colorRampPalette(c('#a8dadc', '#f1faee', '#e63946'))(50),
+         annotation_colors = ann_colors)
